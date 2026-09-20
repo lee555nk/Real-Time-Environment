@@ -88,16 +88,20 @@
     }
     button {
       margin-top: 22px;
+      background: #334155;
+      color: #f8fafc;
+      border: none;
+      padding: 12px 28px;
+      border-radius: 999px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+      transition: all 0.2s;
+    }
+    button.active {
       background: var(--accent);
       color: #0b0f19;
-      border: none;
-      padding: 14px 32px;
-      border-radius: 999px;
-      font-size: 1rem;
-      font-weight: 700;
-      cursor: pointer;
-      box-shadow: 0 4px 14px rgba(56, 189, 248, 0.35);
-      transition: opacity 0.2s;
     }
     button:active {
       opacity: 0.8;
@@ -118,7 +122,7 @@
     <!-- 详细中文地址 -->
     <div class="card full-width">
       <div class="title">当前所在详细中文地址</div>
-      <div class="value-address" id="address">等待获取定位授权...</div>
+      <div class="value-address" id="address">正在自动定位中...</div>
       <div class="sub-info" id="addr-source">数据源：高精度逆地理编码解析</div>
     </div>
 
@@ -172,8 +176,8 @@
     </div>
   </div>
 
-  <button id="toggleBtn" onclick="toggleTracking()">开启实时监测</button>
-  <div class="status" id="statusText">首次打开请点击按钮并允许浏览器定位权限</div>
+  <button id="toggleBtn" onclick="toggleTracking()">暂停监测</button>
+  <div class="status" id="statusText">正在自动启动实时监测...</div>
 
   <script>
     let watchId = null;
@@ -182,17 +186,9 @@
     let lastLat = null;
     let lastLon = null;
 
-    function toggleTracking() {
+    function startTracking() {
       const btn = document.getElementById('toggleBtn');
       const status = document.getElementById('statusText');
-
-      if (watchId !== null) {
-        navigator.geolocation.clearWatch(watchId);
-        watchId = null;
-        btn.innerText = '开启实时监测';
-        status.innerText = '监测已暂停';
-        return;
-      }
 
       if (!('geolocation' in navigator)) {
         status.innerText = '当前浏览器不支持位置服务';
@@ -200,7 +196,8 @@
       }
 
       status.innerText = '正在搜寻高精度卫星信号...';
-      btn.innerText = '停止监测';
+      btn.innerText = '暂停监测';
+      btn.classList.remove('active');
 
       watchId = navigator.geolocation.watchPosition(
         (pos) => {
@@ -222,14 +219,14 @@
 
           status.innerText = `最后刷新: ${new Date().toLocaleTimeString()}`;
 
-          // 定时/按需拉取天气及日出日落数据（每 60 秒一次）
+          // 定时获取天气及日出日落（每 60 秒）
           const now = Date.now();
           if (now - lastWeatherTime > 60000) {
             fetchWeatherData(lat, lon);
             lastWeatherTime = now;
           }
 
-          // 位置移动超过 50 米或时间超过 60 秒时，重新反查详细中文地址
+          // 移动超 50 米或超 60 秒时更新中文地址
           if (now - lastAddressTime > 60000 || !lastLat || calcDistance(lastLat, lastLon, lat, lon) > 50) {
             fetchDetailedChineseAddress(lat, lon);
             lastAddressTime = now;
@@ -251,14 +248,35 @@
               break;
           }
           status.innerText = errorMsg;
-          btn.innerText = '开启实时监测';
+          btn.innerText = '开启监测';
+          btn.classList.add('active');
           watchId = null;
         },
         { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 }
       );
     }
 
-    // 获取温湿度、地表气压、日出日落时间（按当地时区自动解析）
+    function stopTracking() {
+      const btn = document.getElementById('toggleBtn');
+      const status = document.getElementById('statusText');
+      if (watchId !== null) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+      }
+      btn.innerText = '开启监测';
+      btn.classList.add('active');
+      status.innerText = '监测已暂停';
+    }
+
+    function toggleTracking() {
+      if (watchId !== null) {
+        stopTracking();
+      } else {
+        startTracking();
+      }
+    }
+
+    // 获取温湿度、地表气压、日出日落时间
     async function fetchWeatherData(lat, lon) {
       try {
         const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,surface_pressure&daily=sunrise,sunset&timezone=auto`;
@@ -271,7 +289,6 @@
           document.getElementById('pressure').innerText = data.current.surface_pressure;
         }
 
-        // 解析日出日落时间 (格式为 "2026-09-19T06:21")
         if (data && data.daily && data.daily.sunrise && data.daily.sunset) {
           const sunriseStr = data.daily.sunrise[0];
           const sunsetStr = data.daily.sunset[0];
@@ -281,11 +298,11 @@
           }
         }
       } catch (err) {
-        console.error('获取气象与日出日落数据失败:', err);
+        console.error('获取气象数据失败:', err);
       }
     }
 
-    // 细化解析中文地址：国家，省/市，区/县，路/号，地标/建筑物
+    // 细化解析中文地址
     async function fetchDetailedChineseAddress(lat, lon) {
       const addressEl = document.getElementById('address');
       try {
@@ -299,25 +316,20 @@
           const a = data.address;
           const segments = [];
 
-          // 1. 国家
           if (a.country) segments.push(a.country);
 
-          // 2. 省/直辖市/自治区
           const province = a.province || a.state || (a.city && (a.city.endsWith('市') || a.city.includes('北京') || a.city.includes('上海') || a.city.includes('天津') || a.city.includes('重庆')) ? a.city : '');
           if (province && !segments.includes(province)) segments.push(province);
 
-          // 3. 市/地区（若不是直辖市）
           if (a.city && !segments.includes(a.city)) {
             segments.push(a.city);
           }
 
-          // 4. 区 / 县 / 新区 / 功能区
           const district = a.city_district || a.district || a.suburb || a.county || '';
           if (district && !segments.includes(district)) {
             segments.push(district);
           }
 
-          // 5. 道路与门牌号（如：龙华路285号）
           let roadInfo = '';
           const road = a.road || a.street || a.neighbourhood || '';
           const houseNumber = a.house_number ? `${a.house_number}号` : '';
@@ -328,13 +340,11 @@
           }
           if (roadInfo) segments.push(roadInfo);
 
-          // 6. 具体建筑物 / 场馆 / POI 地标名称
           const poi = a.stadium || a.sports_centre || a.building || a.amenity || a.tourism || a.leisure || a.shop || data.name || '';
           if (poi && !segments.includes(poi) && !roadInfo.includes(poi)) {
             segments.push(poi);
           }
 
-          // 拼接最终详细展示
           if (segments.length >= 2) {
             addressEl.innerText = segments.join('，');
           } else {
@@ -349,7 +359,6 @@
       }
     }
 
-    // 辅助计算距离（米）
     function calcDistance(lat1, lon1, lat2, lon2) {
       const R = 6371e3;
       const φ1 = lat1 * Math.PI / 180;
@@ -362,6 +371,11 @@
       const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
       return R * c;
     }
+
+    // 🚀 核心修改：页面加载完毕后立即自动开启定位与数据获取
+    window.addEventListener('DOMContentLoaded', () => {
+      startTracking();
+    });
   </script>
 </body>
 </html>
