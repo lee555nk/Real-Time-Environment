@@ -86,16 +86,20 @@
     }
     button {
       margin-top: 22px;
+      background: #334155;
+      color: #f8fafc;
+      border: none;
+      padding: 12px 32px;
+      border-radius: 999px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+      transition: all 0.2s;
+    }
+    button.active {
       background: var(--accent);
       color: #0b0f19;
-      border: none;
-      padding: 14px 36px;
-      border-radius: 999px;
-      font-size: 1rem;
-      font-weight: 700;
-      cursor: pointer;
-      box-shadow: 0 4px 14px rgba(56, 189, 248, 0.35);
-      transition: all 0.2s;
     }
     button:active { opacity: 0.8; }
     .status {
@@ -116,7 +120,7 @@
     <!-- 详细中文地址 -->
     <div class="card full-width">
       <div class="title">当前所在详细中文地址</div>
-      <div class="value-address" id="address">正在准备定位服务...</div>
+      <div class="value-address" id="address">正在自动定位中...</div>
       <div class="sub-info" id="addr-source">数据源：多通道高精逆地理编码解析</div>
     </div>
 
@@ -170,8 +174,8 @@
     </div>
   </div>
 
-  <button id="actionBtn" onclick="handleBtnClick()">获取实时环境</button>
-  <div class="status" id="statusText">首次打开请点击上方按钮允许定位</div>
+  <button id="actionBtn" onclick="handleBtnClick()">暂停监测</button>
+  <div class="status" id="statusText">正在自动启动实时监测...</div>
 
   <script>
     let watchId = null;
@@ -181,7 +185,7 @@
     let lastLat = null;
     let lastLon = null;
 
-    // --- 1. 火星坐标系 (GCJ-02) 纠偏转换 ---
+    // 1. 火星坐标系 (GCJ-02) 纠偏转换
     function wgs84ToGcj02(wgsLat, wgsLon) {
       const a = 6378245.0;
       const ee = 0.00669342162296594323;
@@ -218,7 +222,7 @@
       return (lon < 72.004 || lon > 137.8347 || lat < 0.8293 || lat > 55.8271);
     }
 
-    // --- 2. 按钮与生命周期管理 ---
+    // 2. 按钮控制
     function handleBtnClick() {
       if (isTracking) {
         stopTracking();
@@ -233,11 +237,13 @@
         watchId = null;
       }
       isTracking = false;
-      document.getElementById('actionBtn').innerText = '恢复监测';
-      document.getElementById('statusText').innerText = '实时监测已暂停';
+      const btn = document.getElementById('actionBtn');
+      btn.innerText = '开启监测';
+      btn.classList.add('active');
+      document.getElementById('statusText').innerText = '实时监测已手动暂停';
     }
 
-    // --- 3. 核心突破：解决国内内网苹果定位超时的双通道机制 ---
+    // 3. 核心定位启动
     function startTrackingProcess() {
       const btn = document.getElementById('actionBtn');
       const status = document.getElementById('statusText');
@@ -248,17 +254,15 @@
       }
 
       status.innerText = '正在调起高精度卫星定位...';
-      btn.innerText = '定位中...';
+      btn.innerText = '暂停监测';
+      btn.classList.remove('active');
 
       let hasAcquiredFirstPoint = false;
 
-      // 阶段 1：先发起一个 3.5 秒的高精度搜星请求
-      const highAccOptions = { enableHighAccuracy: true, timeout: 3500, maximumAge: 0 };
-
-      // 阶段 2：设置定时器，如果 3.5 秒内苹果网络服务器未响应（内网阻断状态），自动无缝降级为基站/Wi-Fi 定位
+      // 3.5秒超时自动降级探针（针对室内弱网）
       const fallbackTimer = setTimeout(() => {
         if (!hasAcquiredFirstPoint) {
-          status.innerText = '检测到卫星信号较弱，已启用基站/Wi-Fi快速定位...';
+          status.innerText = '卫星搜星较弱，已自动切换基站/Wi-Fi定位...';
           navigator.geolocation.getCurrentPosition(
             (pos) => {
               if (!hasAcquiredFirstPoint) {
@@ -285,7 +289,6 @@
           }
         },
         (err) => {
-          // 如果高精度明确返回超时，且定时器还未触发，立刻进行基站降级
           if (err.code === 3 && !hasAcquiredFirstPoint) {
             clearTimeout(fallbackTimer);
             navigator.geolocation.getCurrentPosition(
@@ -299,9 +302,12 @@
               handleLocationError,
               { enableHighAccuracy: false, timeout: 5000, maximumAge: 30000 }
             );
+          } else if (!hasAcquiredFirstPoint) {
+            clearTimeout(fallbackTimer);
+            handleLocationError(err);
           }
         },
-        highAccOptions
+        { enableHighAccuracy: true, timeout: 3500, maximumAge: 0 }
       );
     }
 
@@ -309,7 +315,7 @@
       if (watchId !== null) navigator.geolocation.clearWatch(watchId);
       watchId = navigator.geolocation.watchPosition(
         onLocationSuccess,
-        (err) => console.warn('后台监听波动:', err),
+        (err) => console.warn('监听波动:', err),
         { enableHighAccuracy: true, timeout: 8000, maximumAge: 2000 }
       );
     }
@@ -318,6 +324,7 @@
       isTracking = true;
       const btn = document.getElementById('actionBtn');
       btn.innerText = '暂停监测';
+      btn.classList.remove('active');
 
       const lat = pos.coords.latitude;
       const lon = pos.coords.longitude;
@@ -336,13 +343,11 @@
       document.getElementById('statusText').innerText = `最后刷新: ${new Date().toLocaleTimeString()}`;
 
       const now = Date.now();
-      // 每 45 秒拉取一次气象与日出日落
       if (now - lastWeatherTime > 45000) {
         fetchWeatherData(lat, lon);
         lastWeatherTime = now;
       }
 
-      // 位移超 40 米或超过 45 秒刷新详细地址
       if (now - lastAddressTime > 45000 || !lastLat || calcDistance(lastLat, lastLon, lat, lon) > 40) {
         fetchAddress(lat, lon);
         lastAddressTime = now;
@@ -354,32 +359,32 @@
     function handleLocationError(err) {
       const status = document.getElementById('statusText');
       const btn = document.getElementById('actionBtn');
-      btn.innerText = '点击重新尝试';
+      btn.innerText = '点击重新授权';
+      btn.classList.add('active');
       isTracking = false;
 
       switch (err.code) {
-        case 1: // PERMISSION_DENIED
-          status.innerHTML = '<span style="color:#ef4444">定位被拒绝：请前往 iPhone【设置 > 隐私与安全性 > 定位服务】中将 Safari 设置为“使用期间”并开启“精确位置”</span>';
+        case 1:
+          status.innerHTML = '<span style="color:#ef4444">定位被拒：请去 iPhone【设置 > 隐私与安全性 > 定位服务】中允许 Safari 或网页访问位置</span>';
           break;
-        case 2: // POSITION_UNAVAILABLE
-          status.innerText = '无法获取位置：GPS 及网络位置均无响应，请确认是否处于飞行模式';
+        case 2:
+          status.innerText = '无法获取位置：GPS 及基站均无信号';
           break;
-        case 3: // TIMEOUT
-          status.innerText = '定位超时：当前处于室内或地下弱信号区，请移步窗边或室外开阔地带重试';
+        case 3:
+          status.innerText = '定位超时：室内信号弱，请移步室外或窗边';
           break;
         default:
           status.innerText = `定位异常 (${err.message || '未知错误'})`;
       }
     }
 
-    // --- 4. 国内直连高精逆地理编码解析（双通道智能降级） ---
+    // 4. 国内直连高精中文地址
     function fetchAddress(lat, lon) {
       const addressEl = document.getElementById('address');
       const gcj = wgs84ToGcj02(lat, lon);
       const callbackName = 'geo_cb_' + Math.floor(Math.random() * 1000000);
       let isResolved = false;
 
-      // 4 秒超时保底，防止单个通道无响应
       const timeoutId = setTimeout(() => {
         if (!isResolved) {
           isResolved = true;
@@ -438,12 +443,10 @@
 
       const script = document.createElement('script');
       script.id = callbackName;
-      // 调用国内公共免鉴权 CDN 高德镜像接口
       script.src = `https://restapi.amap.com/v3/geocode/regeo?key=c22144703a8fc4b4d662aa0c46b5a2bf&location=${gcj.lon.toFixed(6)},${gcj.lat.toFixed(6)}&extensions=all&output=json&callback=${callbackName}`;
       document.head.appendChild(script);
     }
 
-    // 备用地址通道（BigDataCloud 免费开放逆地理，自带国内 Anycast CDN 加速且无需 Key）
     async function fallbackAddressChannel(lat, lon) {
       const addressEl = document.getElementById('address');
       const controller = new AbortController();
@@ -466,11 +469,11 @@
           document.getElementById('addr-source').innerText = '数据源：全球 Anycast 镜像直连';
         }
       } catch (err) {
-        addressEl.innerText = '已定位，但网络通信较弱，详细街道稍后刷新';
+        addressEl.innerText = '已定位，详细街道稍后刷新';
       }
     }
 
-    // --- 5. 气象与日出日落数据（带 5 秒超时熔断） ---
+    // 5. 气象与日出日落
     async function fetchWeatherData(lat, lon) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5000);
@@ -492,7 +495,7 @@
           document.getElementById('sunset').innerText = data.daily.sunset[0].split('T')[1];
         }
       } catch (err) {
-        console.warn('气象请求超时或受阻，保持原有数值');
+        console.warn('气象请求超时');
       }
     }
 
@@ -502,19 +505,15 @@
       const φ2 = lat2 * Math.PI / 180;
       const Δφ = (lat2 - lat1) * Math.PI / 180;
       const Δλ = (lon2 - lon1) * Math.PI / 180;
-      const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+      const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+                Math.cos(φ1) * Math.cos(φ2) *
+                Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
       return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 
-    // --- 6. 页面静默探针：如果以前授权过，直接自动起步；如果未授权，等待点击 ---
-    window.addEventListener('load', () => {
-      if (navigator.permissions && navigator.permissions.query) {
-        navigator.permissions.query({ name: 'geolocation' }).then(result => {
-          if (result.state === 'granted') {
-            startTrackingProcess();
-          }
-        }).catch(() => {});
-      }
+    // 🚀 核心修改：页面只要完成加载，直接自动调用启动，不再等待任何权限查询或手动点击
+    window.addEventListener('DOMContentLoaded', () => {
+      startTrackingProcess();
     });
   </script>
 </body>
