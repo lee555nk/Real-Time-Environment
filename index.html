@@ -120,8 +120,8 @@
     <!-- 详细中文地址 -->
     <div class="card full-width">
       <div class="title">当前所在详细中文地址</div>
-      <div class="value-address" id="address">正在自动定位中...</div>
-      <div class="sub-info" id="addr-source">数据源：多通道高精逆地理编码解析</div>
+      <div class="value-address" id="address">正在自动定位并解析门牌地标...</div>
+      <div class="sub-info" id="addr-source">数据源：国内高精门牌地标直连解析</div>
     </div>
 
     <!-- 经纬度坐标与精度 -->
@@ -185,12 +185,11 @@
     let lastLat = null;
     let lastLon = null;
 
-    // 1. 火星坐标系 (GCJ-02) 纠偏转换
+    // --- 1. 坐标转换：WGS-84 转 GCJ-02 (火星坐标) 及 BD-09 (百度坐标) ---
     function wgs84ToGcj02(wgsLat, wgsLon) {
       const a = 6378245.0;
       const ee = 0.00669342162296594323;
       if (outOfChina(wgsLat, wgsLon)) return { lat: wgsLat, lon: wgsLon };
-      
       let dLat = transformLat(wgsLon - 105.0, wgsLat - 35.0);
       let dLon = transformLon(wgsLon - 105.0, wgsLat - 35.0);
       const radLat = (wgsLat / 180.0) * Math.PI;
@@ -200,6 +199,16 @@
       dLat = (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * Math.PI);
       dLon = (dLon * 180.0) / (a / sqrtMagic * Math.cos(radLat) * Math.PI);
       return { lat: wgsLat + dLat, lon: wgsLon + dLon };
+    }
+
+    function gcj02ToBd09(lat, lon) {
+      const x_PI = (3.14159265358979324 * 3000.0) / 180.0;
+      const z = Math.sqrt(lon * lon + lat * lat) + 0.00002 * Math.sin(lat * x_PI);
+      const theta = Math.atan2(lat, lon) + 0.000003 * Math.cos(lon * x_PI);
+      return {
+        lat: z * Math.sin(theta) + 0.006,
+        lon: z * Math.cos(theta) + 0.0065
+      };
     }
 
     function transformLat(x, y) {
@@ -222,7 +231,7 @@
       return (lon < 72.004 || lon > 137.8347 || lat < 0.8293 || lat > 55.8271);
     }
 
-    // 2. 按钮控制
+    // --- 2. 按钮与生命周期控制 ---
     function handleBtnClick() {
       if (isTracking) {
         stopTracking();
@@ -243,7 +252,7 @@
       document.getElementById('statusText').innerText = '实时监测已手动暂停';
     }
 
-    // 3. 核心定位启动
+    // --- 3. 核心定位机制（双通道防卡死） ---
     function startTrackingProcess() {
       const btn = document.getElementById('actionBtn');
       const status = document.getElementById('statusText');
@@ -259,10 +268,10 @@
 
       let hasAcquiredFirstPoint = false;
 
-      // 3.5秒超时自动降级探针（针对室内弱网）
+      // 3.5秒超时探针，室内若卫星较弱自动降级为基站/Wi-Fi
       const fallbackTimer = setTimeout(() => {
         if (!hasAcquiredFirstPoint) {
-          status.innerText = '卫星搜星较弱，已自动切换基站/Wi-Fi定位...';
+          status.innerText = '室内搜星较弱，已启用基站与Wi-Fi定位...';
           navigator.geolocation.getCurrentPosition(
             (pos) => {
               if (!hasAcquiredFirstPoint) {
@@ -348,8 +357,9 @@
         lastWeatherTime = now;
       }
 
-      if (now - lastAddressTime > 45000 || !lastLat || calcDistance(lastLat, lastLon, lat, lon) > 40) {
-        fetchAddress(lat, lon);
+      // 位移超 30 米或超 30 秒时刷新详细地址
+      if (now - lastAddressTime > 30000 || !lastLat || calcDistance(lastLat, lastLon, lat, lon) > 30) {
+        fetchDetailedAddress(lat, lon);
         lastAddressTime = now;
         lastLat = lat;
         lastLon = lon;
@@ -365,75 +375,157 @@
 
       switch (err.code) {
         case 1:
-          status.innerHTML = '<span style="color:#ef4444">定位被拒：请去 iPhone【设置 > 隐私与安全性 > 定位服务】中允许 Safari 或网页访问位置</span>';
+          status.innerHTML = '<span style="color:#ef4444">定位被拒绝：请在 iPhone【设置 > 隐私与安全性 > 定位服务】中开启权限</span>';
           break;
         case 2:
-          status.innerText = '无法获取位置：GPS 及基站均无信号';
+          status.innerText = '无法获取位置：GPS 信号弱，请移步室外或窗边';
           break;
         case 3:
-          status.innerText = '定位超时：室内信号弱，请移步室外或窗边';
+          status.innerText = '定位超时：正在重试，请确保手机未开启低电量模式';
           break;
         default:
           status.innerText = `定位异常 (${err.message || '未知错误'})`;
       }
     }
 
-    // 4. 国内直连高精中文地址
-    function fetchAddress(lat, lon) {
+    // --- 4. 重点重构：高精国内门牌/地标逆地理编码（支持 POI 深度解析） ---
+    function fetchDetailedAddress(lat, lon) {
       const addressEl = document.getElementById('address');
+      const addrSourceEl = document.getElementById('addr-source');
+
+      // 转换为 BD-09 坐标用于百度高精逆地理解析
       const gcj = wgs84ToGcj02(lat, lon);
-      const callbackName = 'geo_cb_' + Math.floor(Math.random() * 1000000);
-      let isResolved = false;
+      const bd = gcj02ToBd09(gcj.lat, gcj.lon);
+
+      const callbackName = 'bd_geo_cb_' + Math.floor(Math.random() * 1000000);
+      let isDone = false;
 
       const timeoutId = setTimeout(() => {
-        if (!isResolved) {
-          isResolved = true;
+        if (!isDone) {
+          isDone = true;
           delete window[callbackName];
-          fallbackAddressChannel(lat, lon);
+          fetchAmapAddressFallback(gcj.lat, gcj.lon);
         }
-      }, 4000);
+      }, 3500);
 
       window[callbackName] = function(data) {
-        if (isResolved) return;
-        isResolved = true;
+        if (isDone) return;
+        isDone = true;
         clearTimeout(timeoutId);
 
+        try {
+          if (data && data.status === 0 && data.result) {
+            const res = data.result;
+            const comp = res.addressComponent || {};
+            const segs = [];
+
+            // 1. 国家
+            segs.push(comp.country || '中国');
+
+            // 2. 省份 / 直辖市
+            const prov = comp.province || '';
+            if (prov) segs.push(prov);
+
+            // 3. 市（若非直辖市）
+            const city = comp.city || '';
+            if (city && city !== prov && !segs.includes(city)) {
+              segs.push(city);
+            }
+
+            // 4. 区 / 县 / 新区
+            const district = comp.district || '';
+            if (district && !segs.includes(district)) {
+              segs.push(district);
+            }
+
+            // 5. 街道 / 乡镇
+            const town = comp.town || '';
+            if (town && !segs.includes(town) && town !== district) {
+              segs.push(town);
+            }
+
+            // 6. 道路与门牌号（如：龙华路285号）
+            let road = comp.street || '';
+            let streetNumber = comp.street_number || '';
+            if (streetNumber && !streetNumber.endsWith('号')) {
+              streetNumber += '号';
+            }
+            let roadFull = road ? (road + streetNumber) : streetNumber;
+            if (roadFull && !segs.includes(roadFull)) {
+              segs.push(roadFull);
+            }
+
+            // 7. 核心地标 / 建筑物 / 场馆 (POI)
+            let poiName = '';
+            if (res.pois && res.pois.length > 0) {
+              poiName = res.pois[0].name;
+            } else if (res.sematic_description) {
+              poiName = res.sematic_description;
+            }
+            if (poiName && !segs.includes(poiName) && !roadFull.includes(poiName)) {
+              segs.push(poiName);
+            }
+
+            // 拼接结构化中文地址展示
+            if (segs.length >= 3) {
+              addressEl.innerText = segs.join('，');
+            } else {
+              addressEl.innerText = res.formatted_address || '解析成功';
+            }
+            addrSourceEl.innerText = '数据源：百度高精门牌地标直连 (国内极速)';
+          } else {
+            fetchAmapAddressFallback(gcj.lat, gcj.lon);
+          }
+        } catch (e) {
+          fetchAmapAddressFallback(gcj.lat, gcj.lon);
+        } finally {
+          delete window[callbackName];
+          const el = document.getElementById(callbackName);
+          if (el) el.remove();
+        }
+      };
+
+      // 百度公开逆地理编码接口（带 POI 与道路门牌扩展参数）
+      const script = document.createElement('script');
+      script.id = callbackName;
+      script.src = `https://api.map.baidu.com/reverse_geocoding/v3/?ak=E48056252769d80322c3aa26f21e4b71&output=json&coordtype=bd09ll&extensions_poi=1&extensions_town=1&extensions_road=1&location=${bd.lat.toFixed(6)},${bd.lon.toFixed(6)}&callback=${callbackName}`;
+      document.head.appendChild(script);
+    }
+
+    // 备用国内高精通道
+    function fetchAmapAddressFallback(lat, lon) {
+      const addressEl = document.getElementById('address');
+      const addrSourceEl = document.getElementById('addr-source');
+      const callbackName = 'amap_fb_' + Math.floor(Math.random() * 1000000);
+
+      window[callbackName] = function(data) {
         try {
           if (data && data.status === '1' && data.regeocode) {
             const re = data.regeocode;
             const comp = re.addressComponent || {};
             const segs = [];
 
-            if (comp.country && typeof comp.country === 'string') segs.push(comp.country);
-            const prov = comp.province;
-            if (prov && typeof prov === 'string') segs.push(prov);
-            const city = comp.city;
-            if (city && typeof city === 'string' && city !== prov && !segs.includes(city)) segs.push(city);
-            const dist = comp.district;
-            if (dist && typeof dist === 'string' && !segs.includes(dist)) segs.push(dist);
+            if (comp.country) segs.push(comp.country);
+            if (comp.province) segs.push(comp.province);
+            if (comp.city && comp.city !== comp.province) segs.push(comp.city);
+            if (comp.district) segs.push(comp.district);
+            if (comp.township && typeof comp.township === 'string') segs.push(comp.township);
 
-            let roadStr = '';
-            if (comp.township && typeof comp.township === 'string') roadStr = comp.township;
-            if (comp.streetNumber && comp.streetNumber.street) {
-              roadStr = comp.streetNumber.street + (comp.streetNumber.number || '');
-            }
-            if (roadStr && !segs.includes(roadStr)) segs.push(roadStr);
+            let road = (comp.streetNumber && comp.streetNumber.street) ? (comp.streetNumber.street + (comp.streetNumber.number || '')) : '';
+            if (road && !segs.includes(road)) segs.push(road);
 
-            let poiName = '';
-            if (re.pois && re.pois.length > 0) {
-              poiName = re.pois[0].name;
-            } else if (re.aois && re.aois.length > 0) {
-              poiName = re.aois[0].name;
-            }
-            if (poiName && !segs.includes(poiName)) segs.push(poiName);
+            let poi = '';
+            if (re.pois && re.pois.length > 0) poi = re.pois[0].name;
+            else if (re.aois && re.aois.length > 0) poi = re.aois[0].name;
+            if (poi && !segs.includes(poi)) segs.push(poi);
 
-            addressEl.innerText = segs.length >= 2 ? segs.join('，') : (re.formatted_address || '解析成功');
-            document.getElementById('addr-source').innerText = '数据源：高精地图直连解析 (国内极速)';
+            addressEl.innerText = segs.length >= 3 ? segs.join('，') : (re.formatted_address || '解析成功');
+            addrSourceEl.innerText = '数据源：高德地图备用通道直连';
           } else {
-            fallbackAddressChannel(lat, lon);
+            addressEl.innerText = '已精确定位，周边详细地标解析中...';
           }
         } catch (e) {
-          fallbackAddressChannel(lat, lon);
+          addressEl.innerText = '已精确定位，周边详细地标解析中...';
         } finally {
           delete window[callbackName];
           const el = document.getElementById(callbackName);
@@ -443,37 +535,11 @@
 
       const script = document.createElement('script');
       script.id = callbackName;
-      script.src = `https://restapi.amap.com/v3/geocode/regeo?key=c22144703a8fc4b4d662aa0c46b5a2bf&location=${gcj.lon.toFixed(6)},${gcj.lat.toFixed(6)}&extensions=all&output=json&callback=${callbackName}`;
+      script.src = `https://restapi.amap.com/v3/geocode/regeo?key=c22144703a8fc4b4d662aa0c46b5a2bf&location=${lon.toFixed(6)},${lat.toFixed(6)}&extensions=all&output=json&callback=${callbackName}`;
       document.head.appendChild(script);
     }
 
-    async function fallbackAddressChannel(lat, lon) {
-      const addressEl = document.getElementById('address');
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 4000);
-
-      try {
-        const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=zh`;
-        const res = await fetch(url, { signal: controller.signal });
-        clearTimeout(timeoutId);
-        const data = await res.json();
-
-        if (data) {
-          const segs = [];
-          if (data.countryName) segs.push(data.countryName);
-          if (data.principalSubdivision) segs.push(data.principalSubdivision);
-          if (data.city && !segs.includes(data.city)) segs.push(data.city);
-          if (data.locality && !segs.includes(data.locality)) segs.push(data.locality);
-
-          addressEl.innerText = segs.length > 0 ? segs.join('，') : '地址解析完成';
-          document.getElementById('addr-source').innerText = '数据源：全球 Anycast 镜像直连';
-        }
-      } catch (err) {
-        addressEl.innerText = '已定位，详细街道稍后刷新';
-      }
-    }
-
-    // 5. 气象与日出日落
+    // --- 5. 气象与日落日出 ---
     async function fetchWeatherData(lat, lon) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5000);
@@ -495,7 +561,7 @@
           document.getElementById('sunset').innerText = data.daily.sunset[0].split('T')[1];
         }
       } catch (err) {
-        console.warn('气象请求超时');
+        console.warn('气象数据请求超时');
       }
     }
 
@@ -511,7 +577,7 @@
       return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 
-    // 🚀 核心修改：页面只要完成加载，直接自动调用启动，不再等待任何权限查询或手动点击
+    // 页面加载完成后自动启动
     window.addEventListener('DOMContentLoaded', () => {
       startTrackingProcess();
     });
