@@ -482,16 +482,27 @@
 
       const amapGeocoder = getAmapGeocoder();
       if (!amapGeocoder) {
-        resolveWithNominatim(lat, lon);
+        resolveWithPhoton(lat, lon);
         return;
       }
 
       const gcj = wgs84ToGcj02(lat, lon);
+      let settled = false;
+      const fallbackTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        resolveWithPhoton(lat, lon);
+      }, 5000);
+
       amapGeocoder.getAddress([gcj.lon, gcj.lat], (status, result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(fallbackTimer);
+
         if (status === 'complete' && result && result.regeocode) {
           renderAmapAddress(result.regeocode);
         } else {
-          resolveWithNominatim(lat, lon);
+          resolveWithPhoton(lat, lon);
         }
       });
     }
@@ -523,6 +534,100 @@
         ? segments.join('，')
         : (regeocode.formattedAddress || '已获取坐标，未解析到道路名称');
       addrSourceEl.innerText = '数据源：高德地图道路级解析';
+    }
+
+    async function resolveWithPhoton(lat, lon) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 7000);
+
+      try {
+        const url = new URL('https://photon.komoot.io/reverse');
+        url.searchParams.set('lat', lat.toFixed(7));
+        url.searchParams.set('lon', lon.toFixed(7));
+
+        const response = await fetch(url, {
+          signal: controller.signal,
+          headers: { Accept: 'application/json' }
+        });
+        if (!response.ok) throw new Error(`Photon ${response.status}`);
+
+        const data = await response.json();
+        const properties = data && data.features && data.features[0] && data.features[0].properties;
+        const formatted = formatPhotonAddress(properties);
+        if (!formatted) throw new Error('empty address');
+
+        addressEl.innerText = formatted;
+        addrSourceEl.innerText = '数据源：Photon / OpenStreetMap 道路级解析';
+      } catch (error) {
+        resolveWithBigDataCloud(lat, lon);
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+
+    function formatPhotonAddress(properties) {
+      if (!properties) return '';
+      const parts = [];
+      const pushUnique = value => {
+        if (value && !parts.includes(value)) parts.push(value);
+      };
+
+      pushUnique(properties.country);
+      pushUnique(properties.state);
+      pushUnique(properties.county);
+      pushUnique(properties.city);
+      pushUnique(properties.locality);
+      pushUnique(properties.street);
+      pushUnique(properties.name);
+
+      return parts.slice(0, 7).join('，');
+    }
+
+    async function resolveWithBigDataCloud(lat, lon) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 7000);
+
+      try {
+        const url = new URL('https://api-bdc.io/data/reverse-geocode-client');
+        url.searchParams.set('latitude', lat.toFixed(7));
+        url.searchParams.set('longitude', lon.toFixed(7));
+        url.searchParams.set('localityLanguage', 'zh');
+
+        const response = await fetch(url, { signal: controller.signal });
+        if (!response.ok) throw new Error(`BigDataCloud ${response.status}`);
+
+        const data = await response.json();
+        const formatted = formatBigDataCloudAddress(data);
+        if (!formatted) throw new Error('empty address');
+
+        addressEl.innerText = formatted;
+        addrSourceEl.innerText = '数据源：BigDataCloud 行政区级解析';
+      } catch (error) {
+        resolveWithNominatim(lat, lon);
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+
+    function formatBigDataCloudAddress(data) {
+      const parts = [];
+      const pushUnique = value => {
+        if (value && !parts.includes(value)) parts.push(value);
+      };
+
+      pushUnique(data.countryName);
+      pushUnique(data.principalSubdivision);
+      pushUnique(data.city || data.locality);
+
+      const administrative = Array.isArray(data.localityInfo && data.localityInfo.administrative)
+        ? [...data.localityInfo.administrative]
+        : [];
+      administrative
+        .filter(item => item && Number.isFinite(item.order) && item.order >= 9)
+        .sort((a, b) => a.order - b.order)
+        .forEach(item => pushUnique(item.name));
+
+      return parts.join('，');
     }
 
     async function resolveWithNominatim(lat, lon) {
