@@ -192,6 +192,24 @@
     let lastLon = null;
     let trackingSession = 0;
 
+    const AUTO_START_KEY = 'live-environment-auto-start';
+
+    function hasAutoStartPreference() {
+      try {
+        return localStorage.getItem(AUTO_START_KEY) === '1';
+      } catch (error) {
+        return false;
+      }
+    }
+
+    function rememberAutoStartPreference() {
+      try {
+        localStorage.setItem(AUTO_START_KEY, '1');
+      } catch (error) {
+        // Private browsing may disable localStorage; the current session still works.
+      }
+    }
+
     const statusEl = document.getElementById('statusText');
     const actionBtn = document.getElementById('actionBtn');
     const addressEl = document.getElementById('address');
@@ -315,7 +333,10 @@
         // Safari may not expose the Geolocation permission state; the button still works.
       }
 
-      if (permissionState === 'granted') {
+      const autoStartRequested = hasAutoStartPreference();
+
+      if (permissionState === 'granted' || (permissionState !== 'denied' && autoStartRequested)) {
+        setStatus('正在自动恢复上次定位...');
         startTrackingProcess();
       } else if (permissionState === 'denied') {
         setStatus('定位权限已被拒绝，请在浏览器网站设置中重新允许位置访问，然后点击“重试定位”。', true);
@@ -412,6 +433,7 @@
 
       isTracking = true;
       isStarting = false;
+      rememberAutoStartPreference();
       updateButton('active');
 
       coordsEl.innerText = `${lat.toFixed(5)}°, ${lon.toFixed(5)}°`;
