@@ -178,22 +178,56 @@
     </div>
   </div>
 
-  <button id="actionBtn" onclick="handleBtnClick()">暂停监测</button>
-  <div class="status" id="statusText">正在自动启动实时监测...</div>
+  <button id="actionBtn" onclick="handleBtnClick()">开启定位</button>
+  <div class="status" id="statusText" aria-live="polite">点击按钮开启定位并授权访问位置</div>
 
   <script>
     let watchId = null;
     let isTracking = false;
+    let isStarting = false;
     let geocoder = null;
     let lastWeatherTime = 0;
     let lastAddressTime = 0;
     let lastLat = null;
     let lastLon = null;
+    let trackingSession = 0;
+
+    const statusEl = document.getElementById('statusText');
+    const actionBtn = document.getElementById('actionBtn');
+    const addressEl = document.getElementById('address');
+    const addrSourceEl = document.getElementById('addr-source');
+    const coordsEl = document.getElementById('coords');
+    const accuracyEl = document.getElementById('accuracy');
+    const altitudeEl = document.getElementById('altitude');
+
+    function setStatus(message, isError = false) {
+      statusEl.innerText = message;
+      statusEl.style.color = isError ? '#fca5a5' : 'var(--text-sub)';
+    }
+
+    function updateButton(state) {
+      actionBtn.classList.remove('active');
+      actionBtn.disabled = false;
+
+      if (state === 'idle') {
+        actionBtn.innerText = '开启定位';
+        actionBtn.classList.add('active');
+      } else if (state === 'busy') {
+        actionBtn.innerText = '定位中...';
+        actionBtn.disabled = true;
+      } else if (state === 'active') {
+        actionBtn.innerText = '暂停监测';
+      } else if (state === 'retry') {
+        actionBtn.innerText = '重试定位';
+        actionBtn.classList.add('active');
+      }
+    }
 
     function wgs84ToGcj02(wgsLat, wgsLon) {
       const a = 6378245.0;
       const ee = 0.00669342162296594323;
       if (outOfChina(wgsLat, wgsLon)) return { lat: wgsLat, lon: wgsLon };
+
       let dLat = transformLat(wgsLon - 105.0, wgsLat - 35.0);
       let dLon = transformLon(wgsLon - 105.0, wgsLat - 35.0);
       const radLat = (wgsLat / 180.0) * Math.PI;
@@ -225,8 +259,75 @@
       return (lon < 72.004 || lon > 137.8347 || lat < 0.8293 || lat > 55.8271);
     }
 
+    function getCurrentPosition(options) {
+      return new Promise((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, options);
+      });
+    }
+
+    async function getBestPosition(session) {
+      setStatus('正在请求位置权限...');
+
+      try {
+        return await getCurrentPosition({
+          enableHighAccuracy: true,
+          timeout: 12000,
+          maximumAge: 0
+        });
+      } catch (highAccuracyError) {
+        if (highAccuracyError.code === 1) throw highAccuracyError;
+        if (session !== trackingSession) throw new Error('tracking-cancelled');
+
+        setStatus('高精度定位超时，正在切换快速定位...');
+        await new Promise(resolve => setTimeout(resolve, 300));
+
+        return getCurrentPosition({
+          enableHighAccuracy: false,
+          timeout: 15000,
+          maximumAge: 300000
+        });
+      }
+    }
+
+    async function prepareTracking() {
+      if (!window.isSecureContext) {
+        setStatus('当前页面不是安全连接，浏览器不会提供定位权限。请使用 HTTPS 页面。', true);
+        updateButton('retry');
+        return;
+      }
+
+      if (!('geolocation' in navigator)) {
+        setStatus('当前浏览器不支持定位功能。', true);
+        updateButton('retry');
+        return;
+      }
+
+      let permissionState = 'prompt';
+      try {
+        const permission = await navigator.permissions.query({ name: 'geolocation' });
+        permissionState = permission.state;
+        permission.addEventListener?.('change', () => {
+          if (permission.state === 'granted' && !isTracking && !isStarting) {
+            startTrackingProcess();
+          }
+        });
+      } catch (error) {
+        // Safari may not expose the Geolocation permission state; the button still works.
+      }
+
+      if (permissionState === 'granted') {
+        startTrackingProcess();
+      } else if (permissionState === 'denied') {
+        setStatus('定位权限已被拒绝，请在浏览器网站设置中重新允许位置访问，然后点击“重试定位”。', true);
+        updateButton('retry');
+      } else {
+        setStatus('点击“开启定位”，并在浏览器提示中允许访问位置。');
+        updateButton('idle');
+      }
+    }
+
     function handleBtnClick() {
-      if (isTracking) {
+      if (isTracking || isStarting) {
         stopTracking();
       } else {
         startTrackingProcess();
@@ -234,266 +335,307 @@
     }
 
     function stopTracking() {
+      trackingSession += 1;
       if (watchId !== null) {
         navigator.geolocation.clearWatch(watchId);
         watchId = null;
       }
       isTracking = false;
-      const btn = document.getElementById('actionBtn');
-      btn.innerText = '开启监测';
-      btn.classList.add('active');
-      document.getElementById('statusText').innerText = '实时监测已手动暂停';
+      isStarting = false;
+      updateButton('idle');
+      setStatus('实时监测已暂停。');
     }
 
-    function startTrackingProcess() {
-      const btn = document.getElementById('actionBtn');
-      const status = document.getElementById('statusText');
+    async function startTrackingProcess() {
+      if (isTracking || isStarting) return;
 
-      if (!('geolocation' in navigator)) {
-        status.innerText = '错误：当前环境不支持 Geolocation 定位';
+      const session = ++trackingSession;
+      isStarting = true;
+      updateButton('busy');
+
+      try {
+        const position = await getBestPosition(session);
+        if (session !== trackingSession) return;
+
+        isStarting = false;
+        isTracking = true;
+        onLocationSuccess(position);
+        startContinuousWatch(session);
+      } catch (error) {
+        if (session !== trackingSession || error.message === 'tracking-cancelled') return;
+        isStarting = false;
+        handleLocationError(error);
+      }
+    }
+
+    function startContinuousWatch(session) {
+      if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+
+      watchId = navigator.geolocation.watchPosition(
+        position => {
+          if (session === trackingSession) onLocationSuccess(position);
+        },
+        error => {
+          if (session !== trackingSession) return;
+          if (error.code === 1) {
+            isTracking = false;
+            handleLocationError(error);
+          } else {
+            setStatus('位置信号暂时中断，页面保留最后位置并继续重试。');
+          }
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 20000,
+          maximumAge: 5000
+        }
+      );
+    }
+
+    function onLocationSuccess(position) {
+      const lat = position.coords.latitude;
+      const lon = position.coords.longitude;
+      const altitude = position.coords.altitude;
+      const accuracy = position.coords.accuracy;
+
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+        isTracking = false;
+        isStarting = false;
+        if (watchId !== null) {
+          navigator.geolocation.clearWatch(watchId);
+          watchId = null;
+        }
+        setStatus('浏览器返回了无效坐标，请点击“重试定位”。', true);
+        updateButton('retry');
         return;
       }
 
-      status.innerText = '正在调起高精度卫星定位...';
-      btn.innerText = '暂停监测';
-      btn.classList.remove('active');
-
-      let hasAcquiredFirstPoint = false;
-
-      const fallbackTimer = setTimeout(() => {
-        if (!hasAcquiredFirstPoint) {
-          status.innerText = '室内搜星较弱，已启用基站辅助定位...';
-          navigator.geolocation.getCurrentPosition(
-            (pos) => {
-              if (!hasAcquiredFirstPoint) {
-                hasAcquiredFirstPoint = true;
-                onLocationSuccess(pos);
-                startContinuousWatch();
-              }
-            },
-            (err) => {
-              if (!hasAcquiredFirstPoint) handleLocationError(err);
-            },
-            { enableHighAccuracy: false, timeout: 5000, maximumAge: 30000 }
-          );
-        }
-      }, 3500);
-
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          clearTimeout(fallbackTimer);
-          if (!hasAcquiredFirstPoint) {
-            hasAcquiredFirstPoint = true;
-            onLocationSuccess(pos);
-            startContinuousWatch();
-          }
-        },
-        (err) => {
-          if (err.code === 3 && !hasAcquiredFirstPoint) {
-            clearTimeout(fallbackTimer);
-            navigator.geolocation.getCurrentPosition(
-              (pos) => {
-                if (!hasAcquiredFirstPoint) {
-                  hasAcquiredFirstPoint = true;
-                  onLocationSuccess(pos);
-                  startContinuousWatch();
-                }
-              },
-              handleLocationError,
-              { enableHighAccuracy: false, timeout: 5000, maximumAge: 30000 }
-            );
-          } else if (!hasAcquiredFirstPoint) {
-            clearTimeout(fallbackTimer);
-            handleLocationError(err);
-          }
-        },
-        { enableHighAccuracy: true, timeout: 3500, maximumAge: 0 }
-      );
-    }
-
-    function startContinuousWatch() {
-      if (watchId !== null) navigator.geolocation.clearWatch(watchId);
-      watchId = navigator.geolocation.watchPosition(
-        onLocationSuccess,
-        (err) => console.warn('监听波动:', err),
-        { enableHighAccuracy: true, timeout: 8000, maximumAge: 2000 }
-      );
-    }
-
-    function onLocationSuccess(pos) {
       isTracking = true;
-      const btn = document.getElementById('actionBtn');
-      btn.innerText = '暂停监测';
-      btn.classList.remove('active');
+      isStarting = false;
+      updateButton('active');
 
-      const lat = pos.coords.latitude;
-      const lon = pos.coords.longitude;
-      const alt = pos.coords.altitude;
-      const acc = pos.coords.accuracy;
+      coordsEl.innerText = `${lat.toFixed(5)}°, ${lon.toFixed(5)}°`;
+      accuracyEl.innerText = Number.isFinite(accuracy)
+        ? `定位精度: 误差 ±${Math.round(accuracy)} 米`
+        : '定位精度: 浏览器未提供';
 
-      document.getElementById('coords').innerText = `${lat.toFixed(5)}°, ${lon.toFixed(5)}°`;
-      document.getElementById('accuracy').innerText = `定位精度: 误差 ±${Math.round(acc)} 米`;
-
-      if (alt !== null && !isNaN(alt)) {
-        document.getElementById('altitude').innerText = alt.toFixed(1);
+      if (Number.isFinite(altitude)) {
+        altitudeEl.innerText = altitude.toFixed(1);
       } else {
-        document.getElementById('altitude').innerText = '弱信号';
+        altitudeEl.innerText = '弱信号';
       }
 
-      document.getElementById('statusText').innerText = `最后刷新: ${new Date().toLocaleTimeString()}`;
+      setStatus(`定位成功，最后刷新：${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`);
 
       const now = Date.now();
       if (now - lastWeatherTime > 45000) {
         fetchWeatherData(lat, lon);
-        lastWeatherTime = now;
       }
 
-      if (now - lastAddressTime > 30000 || !lastLat || calcDistance(lastLat, lastLon, lat, lon) > 25) {
+      if (
+        now - lastAddressTime > 30000 ||
+        lastLat === null ||
+        lastLon === null ||
+        calcDistance(lastLat, lastLon, lat, lon) > 25
+      ) {
         resolveRoadAddress(lat, lon);
-        lastAddressTime = now;
-        lastLat = lat;
-        lastLon = lon;
       }
+
+      lastLat = lat;
+      lastLon = lon;
     }
 
-    function handleLocationError(err) {
-      const status = document.getElementById('statusText');
-      const btn = document.getElementById('actionBtn');
-      btn.innerText = '点击重新授权';
-      btn.classList.add('active');
+    function handleLocationError(error) {
+      if (!error || error.message === 'tracking-cancelled') return;
+
+      const message = {
+        1: '定位被拒：请允许此网站访问位置；iPhone 可在【设置 > 隐私与安全性 > 定位服务】中检查 Safari 网站权限。',
+        2: '无法获取位置：请确认系统定位服务已开启，并到窗边或室外后重试。',
+        3: '定位超时：请确认定位服务已开启，并点击“重试定位”。'
+      }[error.code] || `定位异常：${error.message || '未知错误'}`;
+
+      if (watchId !== null) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+      }
       isTracking = false;
-
-      switch (err.code) {
-        case 1:
-          status.innerHTML = '<span style="color:#ef4444">定位被拒：请去 iPhone【设置 > 隐私与安全性 > 定位服务】中允许 Safari 或网页访问位置</span>';
-          break;
-        case 2:
-          status.innerText = '无法获取位置：GPS 及基站均无信号';
-          break;
-        case 3:
-          status.innerText = '定位超时：室内信号较弱，请移步室外或窗边';
-          break;
-        default:
-          status.innerText = `定位异常 (${err.message || '未知错误'})`;
-      }
+      isStarting = false;
+      updateButton('retry');
+      setStatus(message, true);
     }
 
-    // --- 核心优化：只到区、街道办/乡镇、道路门牌号（不再强求建筑物POI） ---
-    function resolveRoadAddress(lat, lon) {
-      const addressEl = document.getElementById('address');
-      const addrSourceEl = document.getElementById('addr-source');
-
-      const gcj = wgs84ToGcj02(lat, lon);
-
-      if (!geocoder && typeof AMap !== 'undefined' && AMap.Geocoder) {
+    function getAmapGeocoder() {
+      if (geocoder) return geocoder;
+      if (typeof AMap !== 'undefined' && AMap.Geocoder) {
         geocoder = new AMap.Geocoder({
           extensions: 'all',
           radius: 1000
         });
       }
+      return geocoder;
+    }
 
-      if (geocoder) {
-        geocoder.getAddress([gcj.lon, gcj.lat], function(status, result) {
-          if (status === 'complete' && result.regeocode) {
-            const re = result.regeocode;
-            const comp = re.addressComponent || {};
-            const segs = [];
+    function resolveRoadAddress(lat, lon) {
+      lastAddressTime = Date.now();
+      addressEl.innerText = '正在解析街道地址...';
+      addrSourceEl.innerText = '数据源：正在尝试高德地图';
 
-            // 1. 国家
-            if (comp.country) segs.push(comp.country);
+      const amapGeocoder = getAmapGeocoder();
+      if (!amapGeocoder) {
+        resolveWithNominatim(lat, lon);
+        return;
+      }
 
-            // 2. 省份 / 直辖市
-            const prov = comp.province;
-            if (prov) segs.push(prov);
+      const gcj = wgs84ToGcj02(lat, lon);
+      amapGeocoder.getAddress([gcj.lon, gcj.lat], (status, result) => {
+        if (status === 'complete' && result && result.regeocode) {
+          renderAmapAddress(result.regeocode);
+        } else {
+          resolveWithNominatim(lat, lon);
+        }
+      });
+    }
 
-            // 3. 市（若非直辖市）
-            const city = comp.city;
-            if (city && city !== prov && !segs.includes(city)) segs.push(city);
+    function renderAmapAddress(regeocode) {
+      const component = regeocode.addressComponent || {};
+      const segments = [];
+      const pushUnique = value => {
+        if (value && !segments.includes(value)) segments.push(value);
+      };
 
-            // 4. 区 / 县 / 新区
-            const district = comp.district;
-            if (district && !segs.includes(district)) segs.push(district);
+      pushUnique(component.country);
+      pushUnique(component.province);
+      pushUnique(component.city && component.city !== component.province ? component.city : '');
+      pushUnique(component.district);
+      pushUnique(component.township);
 
-            // 5. 街道办 / 乡镇
-            const township = comp.township;
-            if (township && typeof township === 'string' && !segs.includes(township)) {
-              segs.push(township);
-            }
+      let road = '';
+      if (component.streetNumber && component.streetNumber.street) {
+        road = component.streetNumber.street + (component.streetNumber.number || '');
+      } else if (regeocode.roads && regeocode.roads.length > 0) {
+        road = regeocode.roads[0].name;
+      } else if (regeocode.crossroads && regeocode.crossroads.length > 0) {
+        road = `${regeocode.crossroads[0].first_name}与${regeocode.crossroads[0].second_name}交叉口`;
+      }
+      pushUnique(road);
 
-            // 6. 道路与门牌号（最优先提取）
-            let roadStr = '';
-            if (comp.streetNumber && comp.streetNumber.street) {
-              const street = comp.streetNumber.street;
-              const number = comp.streetNumber.number ? comp.streetNumber.number : '';
-              roadStr = street + number;
-            } else if (re.roads && re.roads.length > 0) {
-              // 备用：从最近的道路列表中取第一条道路名
-              roadStr = re.roads[0].name;
-            } else if (re.crossroads && re.crossroads.length > 0) {
-              // 备用：交叉路口
-              roadStr = re.crossroads[0].first_name + '与' + re.crossroads[0].second_name + '交叉口';
-            }
+      addressEl.innerText = segments.length >= 2
+        ? segments.join('，')
+        : (regeocode.formattedAddress || '已获取坐标，未解析到道路名称');
+      addrSourceEl.innerText = '数据源：高德地图道路级解析';
+    }
 
-            if (roadStr && !segs.includes(roadStr)) {
-              segs.push(roadStr);
-            }
+    async function resolveWithNominatim(lat, lon) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 9000);
 
-            // 输出结构化地址，不再依赖建筑物
-            if (segs.length >= 2) {
-              addressEl.innerText = segs.join('，');
-            } else {
-              addressEl.innerText = re.formattedAddress;
-            }
-            addrSourceEl.innerText = '数据源：高德官方引擎道路级解析';
-          } else {
-            addressEl.innerText = '定位成功，道路信息更新中...';
-          }
+      try {
+        const url = new URL('https://nominatim.openstreetmap.org/reverse');
+        url.searchParams.set('format', 'jsonv2');
+        url.searchParams.set('lat', lat.toFixed(7));
+        url.searchParams.set('lon', lon.toFixed(7));
+        url.searchParams.set('zoom', '18');
+        url.searchParams.set('addressdetails', '1');
+        url.searchParams.set('accept-language', 'zh-CN');
+
+        const response = await fetch(url, {
+          signal: controller.signal,
+          headers: { Accept: 'application/json' }
         });
-      } else {
-        addressEl.innerText = '组件加载中，请稍候...';
+        if (!response.ok) throw new Error(`Nominatim ${response.status}`);
+
+        const data = await response.json();
+        const formatted = formatNominatimAddress(data);
+        if (!formatted) throw new Error('empty address');
+
+        addressEl.innerText = formatted;
+        addrSourceEl.innerText = '数据源：OpenStreetMap 备用解析';
+      } catch (error) {
+        addressEl.innerText = '已获取坐标，地址服务暂不可用';
+        addrSourceEl.innerText = '数据源：逆地理编码服务未响应';
+      } finally {
+        clearTimeout(timeoutId);
       }
     }
 
+    function formatNominatimAddress(data) {
+      const address = data && data.address ? data.address : {};
+      const parts = [];
+      const pushUnique = value => {
+        if (value && !parts.includes(value)) parts.push(value);
+      };
+
+      pushUnique(address.country);
+      pushUnique(address.state || address.province);
+      pushUnique(address.city || address.town || address.municipality || address.county);
+      pushUnique(address.city_district || address.district || address.suburb);
+      pushUnique(address.road || address.pedestrian || address.neighbourhood);
+      pushUnique(address.house_number);
+
+      if (parts.length >= 2) return parts.join('，');
+      if (data && data.display_name) {
+        return data.display_name.split(',').map(part => part.trim()).filter(Boolean).slice(0, 5).join('，');
+      }
+      return '';
+    }
+
     async function fetchWeatherData(lat, lon) {
+      lastWeatherTime = Date.now();
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
 
       try {
-        const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,surface_pressure&daily=sunrise,sunset&timezone=auto`;
-        const res = await fetch(url, { signal: controller.signal });
-        clearTimeout(timeoutId);
-        const data = await res.json();
+        const params = new URLSearchParams({
+          latitude: lat.toFixed(5),
+          longitude: lon.toFixed(5),
+          current: 'temperature_2m,relative_humidity_2m,surface_pressure',
+          daily: 'sunrise,sunset',
+          timezone: 'auto'
+        });
 
+        const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params}`, {
+          signal: controller.signal
+        });
+        if (!response.ok) throw new Error(`Open-Meteo ${response.status}`);
+
+        const data = await response.json();
         if (data && data.current) {
-          document.getElementById('temperature').innerText = data.current.temperature_2m;
-          document.getElementById('humidity').innerText = data.current.relative_humidity_2m;
-          document.getElementById('pressure').innerText = data.current.surface_pressure;
+          if (Number.isFinite(data.current.temperature_2m)) {
+            document.getElementById('temperature').innerText = data.current.temperature_2m;
+          }
+          if (Number.isFinite(data.current.relative_humidity_2m)) {
+            document.getElementById('humidity').innerText = data.current.relative_humidity_2m;
+          }
+          if (Number.isFinite(data.current.surface_pressure)) {
+            document.getElementById('pressure').innerText = data.current.surface_pressure;
+          }
         }
 
-        if (data && data.daily && data.daily.sunrise) {
+        if (data && data.daily && data.daily.sunrise && data.daily.sunset) {
           document.getElementById('sunrise').innerText = data.daily.sunrise[0].split('T')[1];
           document.getElementById('sunset').innerText = data.daily.sunset[0].split('T')[1];
         }
-      } catch (err) {
-        console.warn('气象数据请求超时');
+
+      } catch (error) {
+        console.warn('气象数据请求失败:', error);
+      } finally {
+        clearTimeout(timeoutId);
       }
     }
 
     function calcDistance(lat1, lon1, lat2, lon2) {
       const R = 6371e3;
-      const φ1 = lat1 * Math.PI / 180;
-      const φ2 = lat2 * Math.PI / 180;
-      const Δφ = (lat2 - lat1) * Math.PI / 180;
-      const Δλ = (lon2 - lon1) * Math.PI / 180;
-      const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-                Math.cos(φ1) * Math.cos(φ2) *
-                Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+      const phi1 = lat1 * Math.PI / 180;
+      const phi2 = lat2 * Math.PI / 180;
+      const deltaPhi = (lat2 - lat1) * Math.PI / 180;
+      const deltaLambda = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(deltaPhi / 2) * Math.sin(deltaPhi / 2) +
+                Math.cos(phi1) * Math.cos(phi2) *
+                Math.sin(deltaLambda / 2) * Math.sin(deltaLambda / 2);
       return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 
-    window.addEventListener('DOMContentLoaded', () => {
-      startTrackingProcess();
-    });
+    window.addEventListener('DOMContentLoaded', prepareTracking);
   </script>
 </body>
 </html>
