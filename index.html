@@ -67,7 +67,7 @@
       word-break: break-all;
     }
     .value-address {
-      font-size: 1rem;
+      font-size: 1.05rem;
       line-height: 1.6;
       font-weight: 600;
       color: #f1f5f9;
@@ -111,7 +111,6 @@
       line-height: 1.4;
     }
   </style>
-  <!-- 高德官方 Web JS SDK (国内阿里云高速 CDN，免翻墙秒开) -->
   <script type="text/javascript">
     window._AMapSecurityConfig = { securityJsCode: '900b3e58b8f804dc4043b2f883da4e4f' };
   </script>
@@ -124,9 +123,9 @@
   <div class="grid">
     <!-- 详细中文地址 -->
     <div class="card full-width">
-      <div class="title">当前所在详细中文地址</div>
-      <div class="value-address" id="address">正在自动定位并检索详细门牌街道...</div>
-      <div class="sub-info" id="addr-source">数据源：高德官方引擎毫秒直连解析</div>
+      <div class="title">当前所在街道及道路</div>
+      <div class="value-address" id="address">正在获取道路信息...</div>
+      <div class="sub-info" id="addr-source">数据源：高德官方引擎道路级解析</div>
     </div>
 
     <!-- 经纬度坐标与精度 -->
@@ -191,7 +190,6 @@
     let lastLat = null;
     let lastLon = null;
 
-    // --- 1. 火星坐标系转换 (WGS-84 转 GCJ-02) ---
     function wgs84ToGcj02(wgsLat, wgsLon) {
       const a = 6378245.0;
       const ee = 0.00669342162296594323;
@@ -227,7 +225,6 @@
       return (lon < 72.004 || lon > 137.8347 || lat < 0.8293 || lat > 55.8271);
     }
 
-    // --- 2. 按钮与生命周期管理 ---
     function handleBtnClick() {
       if (isTracking) {
         stopTracking();
@@ -248,7 +245,6 @@
       document.getElementById('statusText').innerText = '实时监测已手动暂停';
     }
 
-    // --- 3. 卫星定位机制（带室内降级） ---
     function startTrackingProcess() {
       const btn = document.getElementById('actionBtn');
       const status = document.getElementById('statusText');
@@ -264,7 +260,6 @@
 
       let hasAcquiredFirstPoint = false;
 
-      // 3.5秒超时室内降级探针
       const fallbackTimer = setTimeout(() => {
         if (!hasAcquiredFirstPoint) {
           status.innerText = '室内搜星较弱，已启用基站辅助定位...';
@@ -354,7 +349,7 @@
       }
 
       if (now - lastAddressTime > 30000 || !lastLat || calcDistance(lastLat, lastLon, lat, lon) > 25) {
-        resolveDomesticAddress(lat, lon);
+        resolveRoadAddress(lat, lon);
         lastAddressTime = now;
         lastLat = lat;
         lastLon = lon;
@@ -383,14 +378,13 @@
       }
     }
 
-    // --- 4. 彻底解决：高德官方 Web SDK 本地逆地理编码插件（国内毫秒返回） ---
-    function resolveDomesticAddress(lat, lon) {
+    // --- 核心优化：只到区、街道办/乡镇、道路门牌号（不再强求建筑物POI） ---
+    function resolveRoadAddress(lat, lon) {
       const addressEl = document.getElementById('address');
       const addrSourceEl = document.getElementById('addr-source');
 
       const gcj = wgs84ToGcj02(lat, lon);
 
-      // 确保 SDK Geocoder 插件就绪
       if (!geocoder && typeof AMap !== 'undefined' && AMap.Geocoder) {
         geocoder = new AMap.Geocoder({
           extensions: 'all',
@@ -412,7 +406,7 @@
             const prov = comp.province;
             if (prov) segs.push(prov);
 
-            // 3. 市（非直辖市）
+            // 3. 市（若非直辖市）
             const city = comp.city;
             if (city && city !== prov && !segs.includes(city)) segs.push(city);
 
@@ -426,41 +420,40 @@
               segs.push(township);
             }
 
-            // 6. 道路与门牌号
+            // 6. 道路与门牌号（最优先提取）
             let roadStr = '';
             if (comp.streetNumber && comp.streetNumber.street) {
-              roadStr = comp.streetNumber.street + (comp.streetNumber.number || '');
-            }
-            if (roadStr && !segs.includes(roadStr)) segs.push(roadStr);
-
-            // 7. 具体地标 / 建筑物 / 场馆 / POI
-            let poiName = '';
-            if (re.pois && re.pois.length > 0) {
-              poiName = re.pois[0].name;
-            } else if (re.aois && re.aois.length > 0) {
-              poiName = re.aois[0].name;
-            }
-            if (poiName && !segs.includes(poiName) && !roadStr.includes(poiName)) {
-              segs.push(poiName);
+              const street = comp.streetNumber.street;
+              const number = comp.streetNumber.number ? comp.streetNumber.number : '';
+              roadStr = street + number;
+            } else if (re.roads && re.roads.length > 0) {
+              // 备用：从最近的道路列表中取第一条道路名
+              roadStr = re.roads[0].name;
+            } else if (re.crossroads && re.crossroads.length > 0) {
+              // 备用：交叉路口
+              roadStr = re.crossroads[0].first_name + '与' + re.crossroads[0].second_name + '交叉口';
             }
 
-            // 输出详细拼接地址
-            if (segs.length >= 3) {
+            if (roadStr && !segs.includes(roadStr)) {
+              segs.push(roadStr);
+            }
+
+            // 输出结构化地址，不再依赖建筑物
+            if (segs.length >= 2) {
               addressEl.innerText = segs.join('，');
             } else {
-              addressEl.innerText = re.formattedAddress || '解析成功';
+              addressEl.innerText = re.formattedAddress;
             }
-            addrSourceEl.innerText = '数据源：高德官方地图引擎直连 (全要素门牌地标)';
+            addrSourceEl.innerText = '数据源：高德官方引擎道路级解析';
           } else {
-            addressEl.innerText = '已定位，但地标库暂时未检索到精确建筑';
+            addressEl.innerText = '定位成功，道路信息更新中...';
           }
         });
       } else {
-        addressEl.innerText = '地图组件初始化中，请稍候...';
+        addressEl.innerText = '组件加载中，请稍候...';
       }
     }
 
-    // --- 5. 气象与日出日落 ---
     async function fetchWeatherData(lat, lon) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5000);
