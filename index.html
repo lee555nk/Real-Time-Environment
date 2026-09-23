@@ -507,6 +507,10 @@
       });
     }
 
+    function containsChinese(value) {
+      return /[\u3400-\u9fff]/.test(String(value || ''));
+    }
+
     function renderAmapAddress(regeocode) {
       const component = regeocode.addressComponent || {};
       const segments = [];
@@ -569,7 +573,7 @@
       if (!properties) return '';
       const parts = [];
       const pushUnique = value => {
-        if (value && !parts.includes(value)) parts.push(value);
+        if (containsChinese(value) && !parts.includes(value)) parts.push(value);
       };
 
       pushUnique(properties.country);
@@ -580,7 +584,7 @@
       pushUnique(properties.street);
       pushUnique(properties.name);
 
-      return parts.slice(0, 7).join('，');
+      return parts.length >= 2 ? parts.slice(0, 7).join('，') : '';
     }
 
     async function resolveWithBigDataCloud(lat, lon) {
@@ -612,7 +616,7 @@
     function formatBigDataCloudAddress(data) {
       const parts = [];
       const pushUnique = value => {
-        if (value && !parts.includes(value)) parts.push(value);
+        if (containsChinese(value) && !parts.includes(value)) parts.push(value);
       };
 
       pushUnique(data.countryName);
@@ -627,7 +631,7 @@
         .sort((a, b) => a.order - b.order)
         .forEach(item => pushUnique(item.name));
 
-      return parts.join('，');
+      return parts.length >= 2 ? parts.join('，') : '';
     }
 
     async function resolveWithNominatim(lat, lon) {
@@ -667,7 +671,7 @@
       const address = data && data.address ? data.address : {};
       const parts = [];
       const pushUnique = value => {
-        if (value && !parts.includes(value)) parts.push(value);
+        if (containsChinese(value) && !parts.includes(value)) parts.push(value);
       };
 
       pushUnique(address.country);
@@ -679,7 +683,12 @@
 
       if (parts.length >= 2) return parts.join('，');
       if (data && data.display_name) {
-        return data.display_name.split(',').map(part => part.trim()).filter(Boolean).slice(0, 5).join('，');
+        const chineseParts = data.display_name
+          .split(',')
+          .map(part => part.trim())
+          .filter(containsChinese)
+          .slice(0, 5);
+        if (chineseParts.length >= 2) return chineseParts.join('，');
       }
       return '';
     }
